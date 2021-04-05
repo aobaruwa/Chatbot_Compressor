@@ -1,1 +1,1 @@
-# diacomp
+# Model compression for dialogue 
