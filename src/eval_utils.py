@@ -2,6 +2,7 @@ import argparse
 import datasets  # HF's datasets package
 import logging
 import os
+import time
 import torch
 from tqdm import tqdm
 from transformers import (
@@ -9,18 +10,19 @@ from transformers import (
     AutoModelWithLMHead,
     AutoTokenizer
 )
-from metrics.pycocoevalcap.f1 import f1_score  
+from dataset import preprocess
+from metrics.pycocoevalcap.f1 import f1_score
 from torch.nn.utils.rnn import pad_sequence
-from utils import bool_flag                   
+from train_utils import bool_flag, CEloss
 
 logger = logging.getLogger(__name__)
 
 EOS = "<|endoftext|>"
 toker = AutoTokenizer.from_pretrained('gpt2-medium')
-f1 = datasets.load_metric('f1')
 meteor = datasets.load_metric('meteor')
 rouge = datasets.load_metric('rouge')
 bleu = datasets.load_metric('sacrebleu')
+
 
 def setup_args():
     parser = argparse.ArgumentParser()
@@ -58,24 +60,6 @@ def setup_args():
     return args
 
 
-def preprocess(line: str) -> str:
-    """ clean line instance """
-    # mysterious_toks = ['¥', '—', '°','′', '£', '‘', '、', '。', '“', '”']
-    line = line.replace('—', "-")
-    line = line.replace('‘', "'").replace('′', "'").replace('“', '/"').replace('”', '/"').replace('、', ', ')
-    line = line.replace('° C', ' degree Celsius')
-    line = line.replace('。', '.')
-    # preprocess("I need to remit £ 500 to London. 20° C, ¥ 45 $ 100")
-    curr = {"¥": ' yuan', "$": "dollars", "£": "euros"}
-    for symbol in curr.keys():
-        if symbol in line:
-            idx1 = line.find(symbol)
-            line = line.replace(line[idx1], curr[symbol])
-            #print(symbol, '\t', line)
-            #exit()
-    return line
-
-
 def eval_model(model, args, device):
     model = model.module if hasattr(model, 'module') else model  # remove dataparallel wrapper
     model.to(device)
@@ -92,15 +76,21 @@ def eval_model(model, args, device):
 
             turns = [x.strip() for x in line.rstrip().split('__eou__') if x]
             ctxt, label = ' <|endoftext|> '.join(turns[:-1]), turns[-1]
-            input_id = toker.encode(ctxt+' <|endoftext|>', return_tensors='pt')
-            label_id = toker.encode(label, return_tensors='pt')
-            padded = pad_sequence([torch.t(input_id), torch.t(label_id)], padding_value=0)
-            loss, _, _ = model(input_ids=torch.t(padded[:, 0, :]).to(device),
-                               labels=torch.t(padded[:, 1, :]).to(device))
+            input_ids = toker.encode(ctxt+' <|endoftext|>', return_tensors='pt')
+            # position_ids = torch.tensor(list(range(len(input_ids))))
+            label_ids = toker.encode(label, return_tensors='pt')
+            padded = pad_sequence([torch.t(input_ids), torch.t(label_ids)], padding_value=0)
+            hf_loss, logits, _ = model(input_ids=torch.t(padded[:, 0, :]).to(device),
+                                       labels=torch.t(padded[:, 1, :]).to(device))
+            # print(logits.size(), label_ids.size())
+            # loss, ppl = CEloss(logits, torch.t(padded[:, 1, :]).to(device))
 
-            ppl = torch.exp(loss.cpu()/label_id.shape[-1]).detach().cpu().item()
-
-            output_ids = model.generate(input_id.to(device),
+            # print(loss.cpu().item())
+            ppl = torch.exp(hf_loss.cpu()/input_ids.size(-1))
+            tot_ppl.append(ppl.detach().cpu().item())
+            """
+            # generation takes too long, ignore it during validation.
+            output_ids = model.generate(input_ids.to(device),
                                         pad_token_id=50256,
                                         eos_token_id=50256,
                                         do_sample=args.do_sample,
@@ -114,7 +104,7 @@ def eval_model(model, args, device):
                                         no_repeat_ngram_size=args.ngram_sz,
                                         early_stopping=args.early_stopping)
 
-            resp = output_ids.cpu()[0][input_id.shape[1]:]
+            resp = output_ids.cpu()[0][input_ids.shape[1]:]
                 
             gen_resp = toker.decode(resp, skip_special_tokens=True)
 
@@ -122,8 +112,8 @@ def eval_model(model, args, device):
             met = meteor.compute(predictions=[gen_resp], references=[label])['meteor']
             rougeL = rouge.compute(predictions=[gen_resp], references=[label])['rougeL']
             bleu1, bleu2, bleu3, bleu4 = bleu.compute(predictions=[gen_resp], references=[[label]])['precisions']
-            tot_loss.append(loss.cpu().item())
-            tot_ppl.append(ppl)
+            tot_loss.append(hf_loss.detach().cpu().item())
+            tot_ppl.append(ppl.detach().cpu().item())
             tot_f1.append(f1)
             tot_bleu4.append(bleu4)
             tot_bleu3.append(bleu3)
@@ -131,14 +121,17 @@ def eval_model(model, args, device):
             tot_bleu1.append(bleu1)
             tot_meteor.append(met)
             tot_rougeL.append(rougeL.mid.fmeasure)
-    
+            """
     log_file = os.path.join(args.log_dir, 'eval_log.txt')
-    num_examples = len(tot_f1)
-
+    num_examples = len(tot_ppl)
     with open(log_file, 'a') as f:
-        f.write('{}\t{}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\n'.format(
-        args.epoch, args.grad_step, sum(tot_ppl)/num_examples, sum(tot_f1)/num_examples*100, 
-        sum(tot_rougeL)/num_examples*100, sum(tot_bleu4)/num_examples, sum(tot_meteor)/num_examples,
+        f.write('{:4}\t{:4}\t{:.4f}'.format(args.epoch, args.grad_step, sum(tot_ppl)/num_examples))
+    return sum(tot_ppl)/num_examples
+    """
+    with open(log_file, 'a') as f:
+        f.write('{:4}\t{:4}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\t{:.4f}\n'.format(
+        args.epoch, args.grad_step, sum(tot_ppl)/num_examples, sum(tot_f1)/num_examples*100,
+        sum(tot_rougeL)/num_examples*100, sum(tot_bleu4)/num_examples, sum(tot_meteor)/num_examples*100,
         sum(tot_bleu2)/num_examples, sum(tot_bleu3)/num_examples, sum(tot_bleu1)/num_examples))
 
     return (sum(tot_f1)/num_examples*100,
@@ -149,6 +142,7 @@ def eval_model(model, args, device):
             sum(tot_bleu2)/num_examples,
             sum(tot_bleu1)/num_examples)
 
+    """
 
 def main():
     args = setup_args()
@@ -160,26 +154,9 @@ def main():
         config=config,
     )
     model.load_state_dict(ckpt['model_state'])
-    device = torch.device('cuda:1')
+    device = torch.device('cuda:0')
     eval_model(args.model, args, device)
+
 
 if __name__ == '__main__':
     main()
-"""
-python eval_utils.py --val_data /home/femi/codebase/dd_data/val.txt \
-                     --ckpt_file /home/femi/codebase/model/GP2-pretrain-step-5101.pkl \
-                     --bm_size 1 \
-                     --do_sample True \
-                     --max_resp_len 1000 \
-                     --min_resp_len 1 \
-                     --top_k 40 \
-                     --top_p 0.9 \
-                     --repetition_penalty 1.2 \
-                     --temperature 0.6 \
-                     --ngram_sz 2 \
-                     --early_stopping True \
-                     --log_dir /home/femi/codebase/logs \
-                     --epoch 1 \
-                     --grad_step 2000
-
-"""

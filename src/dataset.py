@@ -9,7 +9,6 @@ import gzip
 import json
 import logging
 import os
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +35,33 @@ def preprocess(line: str) -> str:
     lines like: "I need to remit £ 500 to London at 20° C, converted from ¥ 45 and $ 100"
     """
     # oov_toks = ['¥', '—', '°','′', '£', '‘', '、', '。', '“', '”']
-    curr = {"¥": ' yuan', "$": "dollars", "£": "euros"}
+    curr = {"¥": "yuan", "£": "euro"}
     line = line.replace('—', "-")
     line = line.replace('‘', "'").replace('′', "'").replace('“', '/"').replace('”', '/"').replace('、', ', ')
     line = line.replace('° C', ' degree Celsius')
     line = line.replace('。', '.')
+    # rectify prices
+    if len(set(curr.keys()).intersection(set(line))) == 0:  # no price in line
+        return line
     for symbol in curr.keys():
-        if symbol in line:
-            idx1 = line.find(symbol)
-            line = line.replace(line[idx1], curr[symbol])
+        line = line.replace(symbol+' ', symbol)
+    prices = list(filter(is_price, line.split()))
+    rectified_prices = {price: price_to_text(price) for price in prices}
+    for price in prices:
+        line = line.replace(price, rectified_prices[price])
     return line
+
+
+def is_price(token: str) -> str:
+    curr = {"¥": "yuan", "£": "euro"}
+    price_curr = token[0]
+    return price_curr in curr.keys()
+
+
+def price_to_text(money: str) -> str:
+    """ prices like ¥400.23 become '400.23 yuan' """
+    curr = {"¥": "yuan", "£": "euro"}
+    return f"{money[1:]} {curr[money[0]]}"
 
 
 def read_file(args):
@@ -82,7 +98,6 @@ def read_file(args):
                 print('!!! prepro exception !!!', e)
                 print(line)
                 exit()
-                continue
         # save last chunk
         db[f'chunk_{n_chunk}'] = gzip.compress(json.dumps(chunk).encode('utf-8'))
     # save relevant information to reproduce
@@ -92,7 +107,7 @@ def read_file(args):
             }
     with open(os.path.join(os.path.dirname(db_path), 'meta.json'), 'w') as writer:
         json.dump(meta, writer, indent=4)
-    torch.save(Tokenizer, os.path.join(os.path.dirname(db_path), 'tokenizer.pt'))
+    return
 
 
 class Dialog():
@@ -103,17 +118,18 @@ class Dialog():
         self.args = args
 
     def featurize(self):
-        input_conv = ' <|endoftext|> '.join(turn.rstrip()
-                                            for turn in self.context)
+        input_conv = '<|endoftext|>'.join(turn.rstrip()
+                                          for turn in self.context)
         ctxt_ids = Tokenizer.encode(input_conv)
         resp_ids = Tokenizer.encode(self.response)
         EOS_TOK = Tokenizer.encode(EOS)
-        input_ids = ctxt_ids + EOS_TOK + resp_ids + EOS_TOK
+        input_ids = ctxt_ids + EOS_TOK + resp_ids + EOS_TOK  # last eos prompts model for response 
 
         token_type_ids = [0]*(len(ctxt_ids)+1) + [1]*(len(resp_ids)+1)
 
         position_ids = list(range(len(input_ids)))
-        label_ids = [-100]*len(ctxt_ids) + resp_ids + EOS_TOK + [-100]  # feed EOS as first token in response
+
+        label_ids = [-100]*len(ctxt_ids) + resp_ids + EOS_TOK + [-100]  # [-100] pads label_ids to shape of input_ids
 
         assert len(input_ids) == len(token_type_ids) \
             == len(position_ids) == len(label_ids), "lengths of the sequence \
@@ -143,6 +159,6 @@ if __name__ == '__main__':
 
 """
 python dataset.py --corpus_dir "/home/femi/codebase/dd_data/" \
-                  --chunk_size 1024 \
+                  --chunk_size 2048\
                   --max_seq_len 256
 """
