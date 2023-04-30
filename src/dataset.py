@@ -155,10 +155,3 @@ def main(args):
 if __name__ == '__main__':
     args = setup_args()
     main(args)
-
-
-"""
-python dataset.py --corpus_dir "/home/femi/codebase/dd_data/" \
-                  --chunk_size 2048\
-                  --max_seq_len 256
-"""
