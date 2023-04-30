@@ -207,23 +207,3 @@ def main(args):
 if __name__ == '__main__':
     args = setup_args()
     main(args)
-
-
-"""
-python train.py --train_data '/home/femi/codebase/dd_data/train.256len.db' \
-                --val_data '/home/femi/codebase/dd_data/val.txt' \
-                --model_type 'gpt2-medium' \
-                --batch_size 8 \
-                --epochs 100 \
-                --grad_acc_steps 4 \
-                --lr 1e-5 \
-                --lm_coef 1.0 \
-                --lr_schedule 'noam' \
-                --local_rank -1 \
-                --resume False \
-                --ckpt_file '/home/femi/codebase/model/GPT2-pretrain-step-245.pkl' \
-                --output_dir '/home/femi/codebase/model/' \
-                --log_dir '/home/femi/codebase/logs/' \
-                --use_fp16 False 
-
-"""
